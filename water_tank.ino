@@ -12,15 +12,10 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "config.h"   // WIFI_SSID, WIFI_PASSWORD, WORKER_URL, API_KEY — NOT committed to git
 
 // ---------------- USER CONFIG ----------------
-
-// WiFi
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-
-// Cloudflare Worker endpoint (POST target)
-const char* WORKER_URL = "https://your-worker.your-subdomain.workers.dev/update";
+// WiFi, Worker URL, and API_KEY now live in config.h (copy config.example.h -> config.h)
 
 // Tank calibration (measured from the sensor face, straight down)
 // Distance when tank is EMPTY (sensor to tank bottom / max distance)
@@ -208,6 +203,7 @@ void reportToCloud(float level_percent, float distance_cm) {
   HTTPClient http;
   http.begin(WORKER_URL);
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-API-KEY", API_KEY);
 
   StaticJsonDocument<256> doc;
   doc["level_percent"] = level_percent;
