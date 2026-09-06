@@ -1,0 +1,19 @@
+# Secrets - never commit
+config.h
+.dev.vars
+.env
+
+# Cloudflare / Wrangler
+.wrangler/
+node_modules/
+
+# Arduino / PlatformIO build artifacts
+build/
+.pio/
+*.o
+*.elf
+*.bin
+
+# OS junk
+.DS_Store
+Thumbs.db
