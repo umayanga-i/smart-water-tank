@@ -6,7 +6,7 @@ config.h
 # Cloudflare / Wrangler
 .wrangler/
 node_modules/
-
+ui/
 # Arduino / PlatformIO build artifacts
 build/
 .pio/
