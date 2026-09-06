@@ -1,7 +1,11 @@
 name = "water-tank"
 main = "worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-09-23"
 
-[[kv_namespaces]]
-binding = "TANK_KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+[[durable_objects.bindings]]
+name = "TANK_STATE"
+class_name = "TankState"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TankState"]
