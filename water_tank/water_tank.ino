@@ -1,4 +1,4 @@
-// ESP32-C3 Mini — Water Tank Level Monitor (v3)
+// ESP32-C3 Mini — Water Tank Level Monitor (v4)
 // AJ-SR04M (distance) + 128x32 OLED + Relay (motor) + Buzzer
 // Talks to the Cloudflare Worker's real API:
 //   POST /api/update        periodic telemetry
@@ -43,11 +43,17 @@ unsigned long reportIntervalMs = 10000;
 int   maxRunDurationMin  = 60;     // 0 = disabled
 int   tzOffsetMin        = 330;    // Asia/Colombo default
 bool  rebootRequested    = false;
+char  firmwareVersion[16] = "v1.0.0";  // updated from GET /api/settings
 
 // ---------------- TIMING ----------------
 
 const unsigned long MEASURE_INTERVAL_MS = 2000;   // sensor read + OLED refresh
 const unsigned long SETTINGS_POLL_MS    = 15000;  // GET /api/settings
+
+// OLED info page cycles through sub-screens every N sensor ticks
+static uint8_t oledPage = 0;
+static uint8_t oledPageTick = 0;
+#define OLED_PAGE_TICKS 5   // switch page every 5 × MEASURE_INTERVAL_MS ≈ 10 s
 
 // ---------------- OLED ----------------
 
@@ -194,7 +200,7 @@ void applyMotorControl(float level_percent) {
   if (motorOn && maxRunDurationMin > 0) {
     float runMin = (millis() - motorOnAtMs) / 60000.0;
     if (runMin >= maxRunDurationMin) {
-      setMotor(false, "safety_timeout");
+      setMotor(false, "safety_cutoff");
       return;
     }
   }
@@ -244,26 +250,54 @@ void beep(int times) {
 // ================================================================
 
 void updateOLED() {
+  // Cycle sub-pages every OLED_PAGE_TICKS sensor ticks
+  if (++oledPageTick >= OLED_PAGE_TICKS) {
+    oledPageTick = 0;
+    oledPage = (oledPage + 1) % 3;
+  }
+
   display.clearDisplay();
   display.setTextSize(1);
-  display.setCursor(0, 0);
 
+  // ----- Row 0: always show level + motor state -----
+  display.setCursor(0, 0);
   if (lastLevelPercent >= 0) {
-    display.print("Level: ");
+    display.print("Lvl:");
     display.print(lastLevelPercent, 0);
-    display.println(" %");
+    display.print("%  Mtr:");
+    display.println(motorOn ? "ON" : "OFF");
   } else {
     display.println("Sensor error");
   }
 
-  display.setCursor(0, 10);
-  display.print("Motor: ");
-  display.print(motorOn ? "ON" : "OFF");
-  display.println(autoModeEnabled ? " (AUTO)" : " (MAN)");
-
-  display.setCursor(0, 20);
-  display.print("WiFi: ");
-  display.println(WiFi.status() == WL_CONNECTED ? "OK" : "DOWN");
+  // ----- Rows 1-2: rotating info pages -----
+  display.setCursor(0, 12);
+  switch (oledPage) {
+    case 0: // Distance + mode
+      display.print("Dist:");
+      display.print(lastDistanceCm, 1);
+      display.print("cm ");
+      display.println(autoModeEnabled ? "AUTO" : "MAN");
+      display.setCursor(0, 22);
+      display.print("FW:"); display.println(firmwareVersion);
+      break;
+    case 1: // WiFi RSSI + uptime
+      display.print("WiFi:");
+      display.print(WiFi.status() == WL_CONNECTED ? "OK" : "DOWN");
+      display.print("  RSSI:");
+      display.println(WiFi.RSSI());
+      display.setCursor(0, 22);
+      display.print("Up:"); display.print(millis()/1000); display.println("s");
+      break;
+    case 2: // Runtime today
+      display.println("Run time today:");
+      display.setCursor(0, 22);
+      display.print(runTimeTodaySec / 60);
+      display.print("m ");
+      display.print(runTimeTodaySec % 60);
+      display.println("s");
+      break;
+  }
 
   display.display();
 }
@@ -316,13 +350,14 @@ void reportTelemetry() {
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-API-KEY", API_KEY);
 
-  StaticJsonDocument<256> doc;
-  doc["level_percent"] = lastLevelPercent;
-  doc["distance_cm"] = lastDistanceCm;
-  doc["motor_on"] = motorOn;
-  doc["rssi"] = WiFi.RSSI();
+  StaticJsonDocument<320> doc;
+  doc["level_percent"]      = lastLevelPercent;
+  doc["distance_cm"]        = lastDistanceCm;
+  doc["motor_on"]           = motorOn;
+  doc["rssi"]               = WiFi.RSSI();
   doc["run_time_today_min"] = runTimeTodaySec / 60.0;
-  doc["uptime_s"] = millis() / 1000;
+  doc["uptime_s"]           = (unsigned long)(millis() / 1000);
+  doc["firmware_version"]   = firmwareVersion;
 
   String payload;
   serializeJson(doc, payload);
@@ -376,7 +411,7 @@ void fetchSettings() {
   if (httpCode == 200) {
     String payload = http.getString();
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<640> doc;  // enlarged to accommodate firmware_version string
     DeserializationError err = deserializeJson(doc, payload);
     if (!err) {
       tankHeightCm      = doc["tank_height_cm"]         | tankHeightCm;
@@ -388,6 +423,10 @@ void fetchSettings() {
       maxRunDurationMin = doc["max_run_duration_min"]   | maxRunDurationMin;
       tzOffsetMin       = doc["tz_offset_min"]          | tzOffsetMin;
       rebootRequested   = doc["reboot_requested"]       | false;
+
+      // Store firmware_version so it can be echoed back in telemetry
+      const char* fwv = doc["firmware_version"];
+      if (fwv) strlcpy(firmwareVersion, fwv, sizeof(firmwareVersion));
 
       long intervalS = doc["report_interval_s"] | (reportIntervalMs / 1000);
       reportIntervalMs = intervalS * 1000UL;
@@ -417,6 +456,8 @@ void clearRebootFlag() {
   String payload;
   serializeJson(doc, payload);
 
-  http.POST(payload);
+  int httpCode = http.POST(payload);
+  Serial.print("POST /api/settings (clearRebootFlag) -> ");
+  Serial.println(httpCode);
   http.end();
 }
