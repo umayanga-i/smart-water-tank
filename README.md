@@ -46,5 +46,4 @@ npx wrangler deploy
   repos and will block some known secret patterns, but it's not a substitute
   for keeping secrets out of commits in the first place.
 
-## License
-MIT (or your choice)
+
