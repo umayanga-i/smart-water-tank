@@ -45,6 +45,7 @@ const DEFAULT_SETTINGS = {
   tz_offset_min: 330,         // default Asia/Colombo (UTC+5:30)
   firmware_version: "v1.0.0",
   reboot_requested: false,
+  motor_command: "none",      // "none" | "on" | "off" — one-shot manual override; ESP clears after acting
 };
 
 const CORS_HEADERS = {
@@ -1408,9 +1409,25 @@ function updateStatusIndicators(online) {
 
 // ============ ACTIONS ============
 async function toggleMotor() {
-  // Toggling motor is done by flipping auto_mode or sending a manual command
-  // For now we'll just show feedback — actual motor control is handled by the device
-  showToast('Motor command sent');
+  if (!settingsData) return;
+  // In auto mode, switch to manual first so the command isn't overridden immediately
+  const currentlyOn = dashboardData?.motor?.running ?? false;
+  const cmd = currentlyOn ? 'off' : 'on';
+  try {
+    // If currently in auto mode, disable it so the ESP respects the manual command
+    const body = { motor_command: cmd };
+    if (settingsData.auto_mode_enabled) body.auto_mode_enabled = false;
+    await apiFetch('/api/settings', 'POST', body);
+    if (body.auto_mode_enabled === false) {
+      settingsData.auto_mode_enabled = false;
+      // Update mode segment to Manual
+      const segs = document.querySelectorAll('#modeSegment button');
+      segs.forEach(b => b.classList.remove('active'));
+      segs[1].classList.add('active');
+    }
+    showToast('Motor ' + cmd.toUpperCase() + ' command sent — ESP will act within 15 s');
+    setTimeout(refreshData, 16000); // refresh after ESP has had time to pick it up
+  } catch(e) { showToast('Failed to send motor command'); }
 }
 
 function switchMode(mode, btn) {

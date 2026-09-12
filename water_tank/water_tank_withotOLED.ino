@@ -1,34 +1,35 @@
-// ESP32-C3 Mini — Water Tank Level Monitor (v4)
-// AJ-SR04M (distance) + 128x32 OLED + Relay (motor) + Buzzer
+// ESP32-C3 Mini — Water Tank Level Monitor (no-OLED build)
+// AJ-SR04M (distance) + Relay (motor) + Buzzer + 2× Status LEDs
 // Talks to the Cloudflare Worker's real API:
 //   POST /api/update        periodic telemetry
 //   POST /api/motor-event   fired on every relay ON/OFF transition
 //   GET  /api/settings      pulled each cycle (calibration, thresholds, toggles)
-//   POST /api/settings      used only to clear reboot_requested after acting on it
+//   POST /api/settings      used only to clear reboot_requested / motor_command
 //
 // ECHO pin needs a voltage divider (5V -> 3.3V) before connecting to ESP32-C3!
 // e.g. 1kΩ (ECHO to GPIO) + 2kΩ (GPIO to GND) resistor divider
 //
+// Status LEDs:
+//   GPIO 7 — WiFi LED  : HIGH when connected to WiFi
+//   GPIO 6 — Motor LED : HIGH when motor/relay is ON
+//
 // Libraries needed (Library Manager):
-//   Adafruit_GFX, Adafruit_SSD1306, ArduinoJson
+//   ArduinoJson
 
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <time.h>
 #include "config.h"   // WIFI_SSID, WIFI_PASSWORD, WORKER_URL, API_KEY — gitignored
 
 // ---------------- PINS ----------------
 
-#define TRIG_PIN   4
-#define ECHO_PIN   5
-#define SDA_PIN    8
-#define SCL_PIN    9
-#define RELAY_PIN  3
-#define BUZZER_PIN 2
+#define TRIG_PIN    4
+#define ECHO_PIN    5
+#define RELAY_PIN   3
+#define BUZZER_PIN  2
+#define LED_WIFI    7   // HIGH = WiFi connected
+#define LED_MOTOR   6   // HIGH = motor running
 
 // ---------------- DEFAULT SETTINGS (overwritten by GET /api/settings) -------
 // Field names match the Worker's DEFAULT_SETTINGS exactly.
@@ -48,21 +49,8 @@ char  motorCommand[8]     = "none";    // "none" | "on" | "off" — one-shot fro
 
 // ---------------- TIMING ----------------
 
-const unsigned long MEASURE_INTERVAL_MS = 2000;   // sensor read + OLED refresh
-const unsigned long SETTINGS_POLL_MS    = 15000;  // GET /api/settings
-
-// OLED info page cycles through sub-screens every N sensor ticks
-static uint8_t oledPage = 0;
-static uint8_t oledPageTick = 0;
-#define OLED_PAGE_TICKS 5   // switch page every 5 × MEASURE_INTERVAL_MS ≈ 10 s
-
-// ---------------- OLED ----------------
-
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32
-#define OLED_RESET -1
-#define SCREEN_ADDRESS 0x3C
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+const unsigned long MEASURE_INTERVAL_MS = 2000;   // sensor read every 2 s
+const unsigned long SETTINGS_POLL_MS    = 15000;  // GET /api/settings every 15 s
 
 // ---------------- STATE ----------------
 
@@ -96,20 +84,14 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
-  Wire.begin(SDA_PIN, SCL_PIN);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println("SSD1306 allocation failed");
-    while (true) delay(10);
-  }
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("Connecting WiFi...");
-  display.display();
+  // Status LEDs — start both off
+  pinMode(LED_WIFI,  OUTPUT);
+  pinMode(LED_MOTOR, OUTPUT);
+  digitalWrite(LED_WIFI,  LOW);
+  digitalWrite(LED_MOTOR, LOW);
 
   connectWiFi();
-  fetchSettings();          // get real calibration before first reading
+  fetchSettings();     // get real calibration before first reading
   setupTimeSync();
 }
 
@@ -120,6 +102,9 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  // Update WiFi LED every cycle (handles reconnects)
+  digitalWrite(LED_WIFI, WiFi.status() == WL_CONNECTED ? HIGH : LOW);
+
   if (now - lastMeasureMs >= MEASURE_INTERVAL_MS) {
     lastMeasureMs = now;
 
@@ -129,7 +114,6 @@ void loop() {
       applyMotorControl(lastLevelPercent);
     }
     accumulateRunTime();
-    updateOLED();
   }
 
   if (now - lastSettingsPollMs >= SETTINGS_POLL_MS) {
@@ -182,6 +166,7 @@ void setMotor(bool on, const char* trigger) {
 
   motorOn = on;
   digitalWrite(RELAY_PIN, motorOn ? HIGH : LOW);
+  digitalWrite(LED_MOTOR, motorOn ? HIGH : LOW);  // motor LED mirrors relay
 
   if (buzzerEnabled) beep(motorOn ? 3 : 1);
 
@@ -206,7 +191,7 @@ void applyMotorControl(float level_percent) {
     }
   }
 
-  if (!autoModeEnabled) return; // manual/off mode: leave relay as-is
+  if (!autoModeEnabled) return; // manual mode: leave relay as-is
 
   if (!motorOn && level_percent <= lowThresholdPct) {
     setMotor(true, "auto");
@@ -247,63 +232,6 @@ void beep(int times) {
 }
 
 // ================================================================
-// OLED
-// ================================================================
-
-void updateOLED() {
-  // Cycle sub-pages every OLED_PAGE_TICKS sensor ticks
-  if (++oledPageTick >= OLED_PAGE_TICKS) {
-    oledPageTick = 0;
-    oledPage = (oledPage + 1) % 3;
-  }
-
-  display.clearDisplay();
-  display.setTextSize(1);
-
-  // ----- Row 0: always show level + motor state -----
-  display.setCursor(0, 0);
-  if (lastLevelPercent >= 0) {
-    display.print("Lvl:");
-    display.print(lastLevelPercent, 0);
-    display.print("%  Mtr:");
-    display.println(motorOn ? "ON" : "OFF");
-  } else {
-    display.println("Sensor error");
-  }
-
-  // ----- Rows 1-2: rotating info pages -----
-  display.setCursor(0, 12);
-  switch (oledPage) {
-    case 0: // Distance + mode
-      display.print("Dist:");
-      display.print(lastDistanceCm, 1);
-      display.print("cm ");
-      display.println(autoModeEnabled ? "AUTO" : "MAN");
-      display.setCursor(0, 22);
-      display.print("FW:"); display.println(firmwareVersion);
-      break;
-    case 1: // WiFi RSSI + uptime
-      display.print("WiFi:");
-      display.print(WiFi.status() == WL_CONNECTED ? "OK" : "DOWN");
-      display.print("  RSSI:");
-      display.println(WiFi.RSSI());
-      display.setCursor(0, 22);
-      display.print("Up:"); display.print(millis()/1000); display.println("s");
-      break;
-    case 2: // Runtime today
-      display.println("Run time today:");
-      display.setCursor(0, 22);
-      display.print(runTimeTodaySec / 60);
-      display.print("m ");
-      display.print(runTimeTodaySec % 60);
-      display.println("s");
-      break;
-  }
-
-  display.display();
-}
-
-// ================================================================
 // WIFI + TIME
 // ================================================================
 
@@ -317,7 +245,9 @@ void connectWiFi() {
     Serial.print(".");
   }
   Serial.println();
-  Serial.println(WiFi.status() == WL_CONNECTED ? "WiFi connected" : "WiFi connect failed");
+  bool connected = WiFi.status() == WL_CONNECTED;
+  Serial.println(connected ? "WiFi connected" : "WiFi connect failed");
+  digitalWrite(LED_WIFI, connected ? HIGH : LOW);
 }
 
 bool ensureWiFi() {
@@ -330,7 +260,7 @@ void setupTimeSync() {
   configTime(tzOffsetMin * 60, 0, "pool.ntp.org", "time.nist.gov");
   time_t nowT = time(nullptr);
   int attempts = 0;
-  while (nowT < 100000 && attempts < 20) { // wait for a real epoch time
+  while (nowT < 100000 && attempts < 20) {
     delay(300);
     nowT = time(nullptr);
     attempts++;
@@ -383,8 +313,8 @@ void reportMotorEvent(const char* action, const char* trigger, float duration_mi
   http.addHeader("X-API-KEY", API_KEY);
 
   StaticJsonDocument<192> doc;
-  doc["action"] = action;       // "on" | "off"
-  doc["trigger"] = trigger;     // "auto" | "manual" | "safety_timeout"
+  doc["action"]  = action;       // "on" | "off"
+  doc["trigger"] = trigger;      // "auto" | "manual" | "safety_cutoff"
   if (duration_min >= 0) doc["duration_min"] = duration_min;
 
   String payload;
@@ -412,7 +342,7 @@ void fetchSettings() {
   if (httpCode == 200) {
     String payload = http.getString();
 
-    StaticJsonDocument<640> doc;  // enlarged to accommodate firmware_version string
+    StaticJsonDocument<640> doc;
     DeserializationError err = deserializeJson(doc, payload);
     if (!err) {
       tankHeightCm      = doc["tank_height_cm"]         | tankHeightCm;
@@ -456,7 +386,7 @@ void fetchSettings() {
   }
 }
 
-// Clears motor_command on the server so it doesn't re-fire on the next settings poll
+// Clears motor_command on the server so it doesn't re-fire on the next poll
 void clearMotorCommand() {
   if (!ensureWiFi()) return;
 
